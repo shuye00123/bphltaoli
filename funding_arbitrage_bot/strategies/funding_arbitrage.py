@@ -25,15 +25,46 @@ class FundingArbitrageStrategy:
         self.display_manager = display_manager
         
         # 创建交易所API实例
-        self.hyperliquid_api = HyperliquidApi(
-            config=config,
-            logger=self.logger
-        )
+        self.exchanges = {}
         
-        self.backpack_api = BackpackApi(
-            config=config,
-            logger=self.logger
-        )
+        # 动态加载配置中的所有交易所
+        exchange_configs = config.get("exchanges", {})
+        
+        # 加载Hyperliquid
+        if exchange_configs.get("hyperliquid", {}).get("enabled", False):
+            from funding_arbitrage_bot.exchanges.hyperliquid_api import HyperliquidApi
+            self.exchanges["hyperliquid"] = HyperliquidApi(
+                config=config,
+                logger=self.logger
+            )
+        
+        # 加载Backpack
+        if exchange_configs.get("backpack", {}).get("enabled", False):
+            from funding_arbitrage_bot.exchanges.backpack_api import BackpackApi
+            self.exchanges["backpack"] = BackpackApi(
+                config=config,
+                logger=self.logger
+            )
+        
+        # 加载Binance
+        if exchange_configs.get("binance", {}).get("enabled", False):
+            from funding_arbitrage_bot.exchanges.binance_api import BinanceApi
+            self.exchanges["binance"] = BinanceApi(
+                config=config,
+                logger=self.logger
+            )
+        
+        # 加载OKX
+        if exchange_configs.get("okx", {}).get("enabled", False):
+            from funding_arbitrage_bot.exchanges.okx_api import OKXApi
+            self.exchanges["okx"] = OKXApi(
+                config=config,
+                logger=self.logger
+            )
+        
+        # 检查至少有两个交易所启用
+        if len(self.exchanges) < 2:
+            raise ValueError("至少需要启用两个交易所才能运行套利策略")
         
         # 提取配置
         strategy_config = config.get("strategy", {})
@@ -85,85 +116,86 @@ class FundingArbitrageStrategy:
 
     async def analyze_liquidity(self, coin: str) -> Dict[str, Any]:
         """
-        分析指定币种在两个交易所的流动性情况和可能的滑点
+        分析指定币种在多个交易所的流动性情况和可能的滑点
         
         Args:
             coin: 币种名称
         
         Returns:
-            包含两个交易所流动性分析结果的字典
+            包含所有交易所流动性分析结果的字典
         """
         try:
             results = {}
+            valid_exchanges = 0
+            all_issues = []
             
-            # 获取Hyperliquid订单深度数据并分析
-            hl_orderbook = await self.hyperliquid_api.get_orderbook(coin)
-            hl_price = self.hyperliquid_api.prices.get(coin)
-            hl_analysis = await self._analyze_single_exchange_liquidity(
-                "hyperliquid", coin, hl_orderbook, hl_price
-            )
-            results["hyperliquid"] = hl_analysis
+            # 分析每个交易所的订单簿
+            for exchange_name, api in self.exchanges.items():
+                try:
+                    # 获取订单簿
+                    orderbook = await api.get_orderbook(coin)
+                    
+                    # 获取价格
+                    if exchange_name == "hyperliquid":
+                        price = api.prices.get(coin)
+                    else:
+                        price = await api.get_price(coin)
+                    
+                    # 分析单个交易所的流动性
+                    exchange_analysis = await self._analyze_single_exchange_liquidity(
+                        exchange_name, coin, orderbook, price
+                    )
+                    results[exchange_name] = exchange_analysis
+                    
+                    # 记录流动性问题
+                    if not exchange_analysis.get("has_sufficient_liquidity", False):
+                        all_issues.append(
+                            f"{exchange_name}流动性不足: {exchange_analysis.get('error', '未知原因')}"
+                        )
+                    else:
+                        valid_exchanges += 1
+                        
+                except Exception as e:
+                    self.logger.error(f"分析{exchange_name}的{coin}流动性时出错: {str(e)}")
+                    results[exchange_name] = {
+                        "has_sufficient_liquidity": False,
+                        "error": f"分析出错: {str(e)}"
+                    }
+                    all_issues.append(f"{exchange_name}分析出错: {str(e)}")
             
-            # 获取Backpack订单深度数据并分析
-            bp_orderbook = await self.backpack_api.get_orderbook(coin)
-            bp_price = await self.backpack_api.get_price(coin)
-            bp_analysis = await self._analyze_single_exchange_liquidity(
-                "backpack", coin, bp_orderbook, bp_price
-            )
-            results["backpack"] = bp_analysis
-            
-            # 综合评估两个交易所的流动性情况
-            has_sufficient_liquidity = (
-                hl_analysis.get("has_sufficient_liquidity", False) and
-                bp_analysis.get("has_sufficient_liquidity", False)
-            )
+            # 综合评估所有交易所的流动性情况
+            has_sufficient_liquidity = valid_exchanges >= 2
             
             results["combined"] = {
                 "has_sufficient_liquidity": has_sufficient_liquidity,
-                "issues": []
+                "issues": all_issues,
+                "valid_exchanges": valid_exchanges
             }
-            
-            # 记录任何流动性问题
-            if not hl_analysis.get("has_sufficient_liquidity", False):
-                results["combined"]["issues"].append(
-                    f"Hyperliquid流动性不足: {hl_analysis.get('error', '未知原因')}"
-                )
-                
-            if not bp_analysis.get("has_sufficient_liquidity", False):
-                results["combined"]["issues"].append(
-                    f"Backpack流动性不足: {bp_analysis.get('error', '未知原因')}"
-                )
-            
-            # 确定做多和做空的交易所
-            hl_funding = self.funding_rates.get(f"HL_{coin}", 0)
-            bp_funding = self.funding_rates.get(f"BP_{coin}", 0)
-            funding_diff = hl_funding - bp_funding if hl_funding is not None and bp_funding is not None else 0
-            
-            long_exchange = "hyperliquid" if funding_diff < 0 else "backpack"
-            short_exchange = "backpack" if funding_diff < 0 else "hyperliquid"
-            
-            # 获取滑点信息
-            long_analysis = results.get(long_exchange, {})
-            short_analysis = results.get(short_exchange, {})
-            
-            long_slippage = long_analysis.get("bid_slippage_pct", 0)
-            short_slippage = short_analysis.get("ask_slippage_pct", 0)
-            total_slippage = long_slippage + short_slippage
-            
-            # 将滑点信息添加到results中
-            results["long_exchange"] = long_exchange
-            results["short_exchange"] = short_exchange
-            results["long_slippage"] = long_slippage
-            results["short_slippage"] = short_slippage
-            results["total_slippage"] = total_slippage
             
             # 将滑点信息添加到市场数据中
             if hasattr(self, "market_data") and coin in self.market_data:
-                self.market_data[coin]["total_slippage"] = total_slippage
-                self.market_data[coin]["long_slippage"] = long_slippage
-                self.market_data[coin]["short_slippage"] = short_slippage
-                self.market_data[coin]["liquidity_analysis"] = results
-                self.logger.debug(f"在流动性分析中添加{coin}的滑点信息: total_slippage={total_slippage}")
+                # 计算平均滑点
+                total_bid_slippage = 0
+                total_ask_slippage = 0
+                count = 0
+                
+                for exchange_name, analysis in results.items():
+                    if exchange_name != "combined" and analysis.get("has_sufficient_liquidity", False):
+                        total_bid_slippage += analysis.get("bid_slippage_pct", 0)
+                        total_ask_slippage += analysis.get("ask_slippage_pct", 0)
+                        count += 1
+                
+                if count > 0:
+                    avg_bid_slippage = total_bid_slippage / count
+                    avg_ask_slippage = total_ask_slippage / count
+                    avg_total_slippage = avg_bid_slippage + avg_ask_slippage
+                    
+                    self.market_data[coin]["total_slippage"] = avg_total_slippage
+                    self.market_data[coin]["bid_slippage"] = avg_bid_slippage
+                    self.market_data[coin]["ask_slippage"] = avg_ask_slippage
+                    self.market_data[coin]["liquidity_analysis"] = results
+                    
+                    self.logger.debug(f"在流动性分析中添加{coin}的滑点信息: total_slippage={avg_total_slippage:.4f}%")
                 
                 # 如果有display_manager，立即更新显示
                 if hasattr(self, "display_manager") and self.display_manager:
@@ -176,7 +208,8 @@ class FundingArbitrageStrategy:
             return {
                 "combined": {
                     "has_sufficient_liquidity": False,
-                    "error": f"流动性分析错误: {e}"
+                    "error": f"流动性分析错误: {e}",
+                    "issues": [f"流动性分析错误: {e}"]
                 }
             }
     
@@ -348,6 +381,7 @@ class FundingArbitrageStrategy:
     async def update_market_data(self):
         """
         更新市场数据字典，用于显示和记录
+        支持多交易所数据收集
         """
         try:
             # 如果市场数据字典尚未初始化
@@ -358,40 +392,36 @@ class FundingArbitrageStrategy:
             for coin in self.coins_to_monitor:
                 if coin not in self.market_data:
                     self.market_data[coin] = {}
-                    
-                # 获取Hyperliquid数据
-                hl_price = self.hyperliquid_api.prices.get(coin)
-                hl_funding_rate = self.funding_rates.get(f"HL_{coin}")
                 
-                if hl_price:
-                    if "hyperliquid" not in self.market_data[coin]:
-                        self.market_data[coin]["hyperliquid"] = {}
+                # 收集所有交易所的数据
+                for exchange_name, api in self.exchanges.items():
+                    # 确保交易所数据结构存在
+                    if exchange_name not in self.market_data[coin]:
+                        self.market_data[coin][exchange_name] = {}
                     
-                    self.market_data[coin]["hyperliquid"]["price"] = hl_price
+                    # 获取价格
+                    try:
+                        if exchange_name == "hyperliquid":
+                            price = api.prices.get(coin)
+                        else:
+                            price = await api.get_price(coin)
+                            
+                        if price:
+                            self.market_data[coin][exchange_name]["price"] = price
+                    except Exception as e:
+                        self.logger.debug(f"获取{exchange_name}的{coin}价格时出错: {str(e)}")
                     
-                if hl_funding_rate is not None:
-                    if "hyperliquid" not in self.market_data[coin]:
-                        self.market_data[coin]["hyperliquid"] = {}
+                    # 获取资金费率
+                    funding_rate = self.funding_rates.get(f"{exchange_name.upper()}_{coin}")
+                    if funding_rate is not None:
+                        self.market_data[coin][exchange_name]["funding_rate"] = funding_rate
                         
-                    self.market_data[coin]["hyperliquid"]["funding_rate"] = hl_funding_rate
-                    # 调整为8小时资金费率，方便与BP比较
-                    self.market_data[coin]["hyperliquid"]["adjusted_funding_rate"] = hl_funding_rate * 8
-                    
-                # 获取Backpack数据
-                bp_price = await self.backpack_api.get_price(coin)
-                bp_funding_rate = self.funding_rates.get(f"BP_{coin}")
+                        # 对于Hyperliquid，添加调整后的资金费率（8小时）
+                        if exchange_name == "hyperliquid":
+                            self.market_data[coin][exchange_name]["adjusted_funding_rate"] = funding_rate * 8
                 
-                if bp_price:
-                    if "backpack" not in self.market_data[coin]:
-                        self.market_data[coin]["backpack"] = {}
-                        
-                    self.market_data[coin]["backpack"]["price"] = bp_price
-                    
-                if bp_funding_rate is not None:
-                    if "backpack" not in self.market_data[coin]:
-                        self.market_data[coin]["backpack"] = {}
-                        
-                    self.market_data[coin]["backpack"]["funding_rate"] = bp_funding_rate
+                # 计算最佳套利对
+                self._calculate_best_arbitrage_pair(coin)
             
             # 更新DisplayManager显示
             if self.display_manager:
@@ -400,13 +430,68 @@ class FundingArbitrageStrategy:
             return self.market_data
             
         except Exception as e:
-            self.logger.error(f"更新市场数据出错: {e}")
+            self.logger.error(f"更新市场数据出错: {str(e)}")
             return {}
+    
+    def _calculate_best_arbitrage_pair(self, coin: str):
+        """
+        计算币种的最佳套利交易所对
+        
+        Args:
+            coin: 币种名称
+        """
+        try:
+            if coin not in self.market_data:
+                return
+                
+            # 收集所有有效交易所的资金费率
+            valid_exchanges = {}
+            for exchange_name in self.exchanges.keys():
+                if (exchange_name in self.market_data[coin] and 
+                    "funding_rate" in self.market_data[coin][exchange_name] and
+                    "price" in self.market_data[coin][exchange_name]):
+                    
+                    # 使用调整后的资金费率（如果有）
+                    if "adjusted_funding_rate" in self.market_data[coin][exchange_name]:
+                        rate = self.market_data[coin][exchange_name]["adjusted_funding_rate"]
+                    else:
+                        rate = self.market_data[coin][exchange_name]["funding_rate"]
+                        
+                    valid_exchanges[exchange_name] = {
+                        "funding_rate": rate,
+                        "price": self.market_data[coin][exchange_name]["price"]
+                    }
+            
+            # 需要至少两个交易所才能套利
+            if len(valid_exchanges) < 2:
+                return
+                
+            # 找出资金费率最高和最低的交易所
+            max_exchange = max(valid_exchanges, key=lambda x: valid_exchanges[x]["funding_rate"])
+            min_exchange = min(valid_exchanges, key=lambda x: valid_exchanges[x]["funding_rate"])
+            
+            max_rate = valid_exchanges[max_exchange]["funding_rate"]
+            min_rate = valid_exchanges[min_exchange]["funding_rate"]
+            
+            # 计算资金费率差异
+            funding_diff = max_rate - min_rate
+            
+            # 记录最佳套利对
+            self.market_data[coin]["best_pair"] = {
+                "long_exchange": min_exchange,  # 资金费率低的做多
+                "short_exchange": max_exchange,  # 资金费率高的做空
+                "funding_diff": funding_diff,
+                "long_rate": min_rate,
+                "short_rate": max_rate
+            }
+            
+        except Exception as e:
+            self.logger.debug(f"计算{coin}最佳套利对时出错: {str(e)}")
     
     async def check_for_opportunities(self):
         """
         检查所有交易对的套利机会
-        扩展版本: 检查资金费率、价格差异、流动性情况和滑点控制
+        多交易所版本: 动态评估所有交易所组合，选择最佳套利对
         """
         current_time = time.time()
         
@@ -417,16 +502,14 @@ class FundingArbitrageStrategy:
         self.last_check_time = current_time
         self.stats["checks"] += 1
         
-        # 获取资金费率信息
         try:
+            # 更新资金费率和市场数据
             await self.update_funding_rates()
-            
-            # 更新市场数据
             await self.update_market_data()
             
             # 检查每个币种的套利机会
             for coin in self.coins_to_monitor:
-                # 检查是否在冷却期
+                # 检查交易冷却期
                 if coin in self.last_trade_time:
                     time_since_last_trade = current_time - self.last_trade_time[coin]
                     if time_since_last_trade < self.trade_cooldown:
@@ -434,44 +517,87 @@ class FundingArbitrageStrategy:
                         self.logger.debug(f"{coin}仍在交易冷却期 (剩余{cooldown_left:.1f}秒)")
                         continue
                 
-                # 获取资金费率
-                hl_funding_rate = self.funding_rates.get(f"HL_{coin}", 0)
-                bp_funding_rate = self.funding_rates.get(f"BP_{coin}", 0)
+                # 获取所有交易所的数据
+                exchange_data = {}
+                for exchange_name, api in self.exchanges.items():
+                    # 获取资金费率
+                    funding_rate = self.funding_rates.get(f"{exchange_name.upper()}_{coin}")
+                    if funding_rate is None:
+                        continue
+                        
+                    # 获取价格
+                    if exchange_name == "hyperliquid":
+                        price = api.prices.get(coin)
+                    else:
+                        price = await api.get_price(coin)
+                        
+                    if price is None:
+                        continue
+                        
+                    exchange_data[exchange_name] = {
+                        "funding_rate": funding_rate,
+                        "price": price,
+                        "api": api
+                    }
                 
-                if hl_funding_rate is None or bp_funding_rate is None:
-                    self.logger.warning(f"无法获取{coin}的完整资金费率")
+                # 需要至少两个交易所的数据
+                if len(exchange_data) < 2:
+                    self.logger.debug(f"{coin} - 不足两个交易所提供有效数据")
                     continue
                 
-                # 计算资金费率差异
-                funding_diff = hl_funding_rate - bp_funding_rate
-                abs_funding_diff = abs(funding_diff)
+                # 评估所有可能的交易所组合
+                best_opportunity = None
+                exchanges = list(exchange_data.keys())
                 
-                # 获取两个交易所的价格
-                hl_price = self.hyperliquid_api.prices.get(coin)
-                bp_price = await self.backpack_api.get_price(coin)
-                
-                if not hl_price or not bp_price:
-                    self.logger.warning(f"无法获取{coin}的完整价格信息")
-                    continue
-                
-                # 计算价格差异
-                price_diff_pct = abs(hl_price - bp_price) / min(hl_price, bp_price)
-                
-                # 分析两个交易所的流动性情况（提前获取滑点信息用于日志记录）
-                liquidity_analysis = await self.analyze_liquidity(coin)
-                combined_analysis = liquidity_analysis.get("combined", {})
-                
-                # 确定做多和做空的交易所
-                long_exchange = "hyperliquid" if funding_diff < 0 else "backpack"
-                short_exchange = "backpack" if funding_diff < 0 else "hyperliquid"
-                
-                # 获取相应的滑点信息
-                long_analysis = liquidity_analysis.get(long_exchange, {})
-                short_analysis = liquidity_analysis.get(short_exchange, {})
-                
-                long_slippage = long_analysis.get("bid_slippage_pct", 0)
-                short_slippage = short_analysis.get("ask_slippage_pct", 0)
-                total_slippage = long_slippage + short_slippage
+                for i in range(len(exchanges)):
+                    for j in range(i+1, len(exchanges)):
+                        ex1 = exchanges[i]
+                        ex2 = exchanges[j]
+                        
+                        # 计算资金费率差异
+                        funding_diff = exchange_data[ex1]["funding_rate"] - exchange_data[ex2]["funding_rate"]
+                        abs_funding_diff = abs(funding_diff)
+                        
+                        # 计算价格差异百分比
+                        price_diff_pct = abs(exchange_data[ex1]["price"] - exchange_data[ex2]["price"]) / min(
+                            exchange_data[ex1]["price"], exchange_data[ex2]["price"])
+                        
+                        # 确定做多和做空的交易所
+                        if funding_diff > 0:
+                            long_exchange, short_exchange = ex2, ex1
+                        else:
+                            long_exchange, short_exchange = ex1, ex2
+                        
+                        # 分析流动性
+                        liquidity_analysis = await self.analyze_liquidity(coin)
+                        
+                        # 获取滑点信息
+                        long_slippage = liquidity_analysis.get(long_exchange, {}).get("bid_slippage_pct", 0)
+                        short_slippage = liquidity_analysis.get(short_exchange, {}).get("ask_slippage_pct", 0)
+                        total_slippage = long_slippage + short_slippage
+                        
+                        # 计算评分 (资金费率差 - 滑点成本)
+                        score = abs_funding_diff - (total_slippage / 100)
+                        
+                        # 检查是否优于当前最佳机会
+                        if (best_opportunity is None or score > best_opportunity["score"]) and \
+                           abs_funding_diff >= self.min_funding_diff and \
+                           price_diff_pct <= self.min_price_diff_pct and \
+                           total_slippage <= self.max_slippage_pct * 2:
+                            
+                            best_opportunity = {
+                                "coin": coin,
+                                "long_exchange": long_exchange,
+                                "short_exchange": short_exchange,
+                                "funding_diff": funding_diff,
+                                "abs_funding_diff": abs_funding_diff,
+                                "price_diff_pct": price_diff_pct,
+                                "long_slippage": long_slippage,
+                                "short_slippage": short_slippage,
+                                "total_slippage": total_slippage,
+                                "score": score,
+                                "liquidity_analysis": liquidity_analysis
+                            }
                 
                 # 判断滑点是否在允许范围内
                 slippage_ok = total_slippage <= self.max_slippage_pct * 2
@@ -494,10 +620,8 @@ class FundingArbitrageStrategy:
                 
                 # 记录基本信息（添加滑点信息）
                 self.logger.debug(
-                    f"{coin} - 资金费率差: {funding_diff:.6f} "
-                    f"(HL: {hl_funding_rate:.6f}, BP: {bp_funding_rate:.6f}), "
-                    f"价格差: {price_diff_pct:.4%} "
-                    f"(HL: {hl_price:.2f}, BP: {bp_price:.2f}), "
+                    f"{coin} - 资金费率差: {funding_diff:.6f}, "
+                    f"价格差: {price_diff_pct:.4%}, "
                     f"滑点: {long_exchange}买入{long_slippage:.4f}%, "
                     f"{short_exchange}卖出{short_slippage:.4f}%, "
                     f"总滑点: {total_slippage:.4f}% "
@@ -518,15 +642,16 @@ class FundingArbitrageStrategy:
                 # 检查是否满足套利条件
                 if funding_ok and price_ok:
                     # 检查流动性是否充足
-                    if not combined_analysis.get("has_sufficient_liquidity", False):
-                        issues = combined_analysis.get("issues", [])
+                    combined_liquidity = liquidity_analysis.get("combined", {})
+                    if not combined_liquidity.get("has_sufficient_liquidity", False):
+                        issues = combined_liquidity.get("issues", [])
                         issues_text = "; ".join(issues) if issues else "未知流动性问题"
                         self.logger.info(f"{coin}套利机会 - 但{issues_text}")
                         
                         # 记录详细流动性分析结果
                         if self.logger.level <= logging.DEBUG:
-                            self.logger.debug(f"Hyperliquid流动性分析: {liquidity_analysis.get('hyperliquid', {})}")
-                            self.logger.debug(f"Backpack流动性分析: {liquidity_analysis.get('backpack', {})}")
+                            for exchange_name in self.exchanges.keys():
+                                self.logger.debug(f"{exchange_name}流动性分析: {liquidity_analysis.get(exchange_name, {})}")
                         continue
                     
                     # 检查滑点是否在可接受范围内
@@ -586,82 +711,134 @@ class FundingArbitrageStrategy:
                 except Exception as display_e:
                     self.logger.error(f"更新显示时出错: {display_e}")
 
-    async def execute_arbitrage(self, coin: str, funding_diff: float, liquidity_analysis: Dict[str, Any]):
+    async def execute_arbitrage(self, opportunity: Dict[str, Any]):
         """
-        执行套利交易
+        执行多交易所套利交易
         
         Args:
-            coin: 币种
-            funding_diff: 资金费率差异
-            liquidity_analysis: 流动性分析结果
+            opportunity: 套利机会字典，包含:
+                - coin: 币种
+                - long_exchange: 做多交易所
+                - short_exchange: 做空交易所 
+                - funding_diff: 资金费率差异
+                - liquidity_analysis: 流动性分析结果
         """
+        coin = opportunity["coin"]
+        long_exchange = opportunity["long_exchange"]
+        short_exchange = opportunity["short_exchange"]
+        
         try:
             # 记录交易时间
             self.last_trade_time[coin] = time.time()
             
-            # 确定交易方向
-            long_exchange = "hyperliquid" if funding_diff < 0 else "backpack"
-            short_exchange = "backpack" if funding_diff < 0 else "hyperliquid"
+            # 获取交易所API实例
+            long_api = self.exchanges[long_exchange]
+            short_api = self.exchanges[short_exchange]
             
-            # 获取相应交易所的分析结果
+            # 获取流动性分析结果
+            liquidity_analysis = opportunity["liquidity_analysis"]
             long_analysis = liquidity_analysis.get(long_exchange, {})
             short_analysis = liquidity_analysis.get(short_exchange, {})
             
+            # 计算交易参数
             trade_size_usd = self.trade_size_usd
             long_price = long_analysis.get("current_price", 0)
             short_price = short_analysis.get("current_price", 0)
+            coin_size = trade_size_usd / long_price  # 基于做多价格计算数量
             
             # 获取滑点信息
             long_slippage = long_analysis.get("bid_slippage_pct", 0)
             short_slippage = short_analysis.get("ask_slippage_pct", 0)
             
             self.logger.info(
-                f"执行{coin}套利: 在{long_exchange}做多, 在{short_exchange}做空, "
-                f"交易金额: ${trade_size_usd:.2f}, "
-                f"价格: {long_exchange}${long_price:.2f}, {short_exchange}${short_price:.2f}"
+                f"执行{coin}套利: \n"
+                f"  做多: {long_exchange} {coin_size:.6f}{coin} @ ~${long_price:.2f} (滑点:{long_slippage:.4f}%)\n"
+                f"  做空: {short_exchange} {coin_size:.6f}{coin} @ ~${short_price:.2f} (滑点:{short_slippage:.4f}%)\n"
+                f"  交易金额: ${trade_size_usd:.2f}"
             )
             
             # 计算预期收益
-            expected_daily_return = abs(funding_diff) * trade_size_usd
+            funding_diff = opportunity["abs_funding_diff"]
+            expected_daily_return = funding_diff * trade_size_usd
             expected_return_per_hour = expected_daily_return / 24
-            
-            # 考虑滑点的净收益
             slippage_cost = (long_slippage + short_slippage) / 100 * trade_size_usd
             net_expected_daily_return = expected_daily_return - slippage_cost
             
-            self.logger.info(
-                f"预期收益: 每天${expected_daily_return:.2f}(扣除滑点后${net_expected_daily_return:.2f}), "
-                f"每小时${expected_return_per_hour:.2f}"
-            )
-            
-            # 在这里添加实际交易代码
-            # ...
+            # 执行实际交易
+            if self.execution_mode == "live":
+                # 同时下单
+                long_order = long_api.create_order(
+                    symbol=coin,
+                    side="BUY",
+                    amount=coin_size,
+                    price=long_price
+                )
+                
+                short_order = short_api.create_order(
+                    symbol=coin,
+                    side="SELL", 
+                    amount=coin_size,
+                    price=short_price
+                )
+                
+                # 等待订单完成
+                await asyncio.gather(long_order, short_order)
+                
+                # 更新仓位信息
+                if coin not in self.open_positions:
+                    self.open_positions[coin] = {}
+                
+                self.open_positions[coin].update({
+                    "long": {
+                        "exchange": long_exchange,
+                        "size": coin_size,
+                        "entry_price": long_price
+                    },
+                    "short": {
+                        "exchange": short_exchange,
+                        "size": coin_size,
+                        "entry_price": short_price
+                    },
+                    "open_time": time.time()
+                })
             
             # 记录交易
             trade_record = {
                 "timestamp": time.time(),
                 "coin": coin,
-                "funding_diff": funding_diff,
                 "long_exchange": long_exchange,
                 "short_exchange": short_exchange,
                 "trade_size_usd": trade_size_usd,
+                "coin_size": coin_size,
                 "long_price": long_price,
                 "short_price": short_price,
+                "funding_diff": funding_diff,
                 "expected_daily_return": expected_daily_return,
                 "slippage_cost": slippage_cost,
                 "net_expected_daily_return": net_expected_daily_return,
-                "slippage_long": long_slippage,
-                "slippage_short": short_slippage
+                "long_slippage": long_slippage,
+                "short_slippage": short_slippage,
+                "execution_mode": self.execution_mode
             }
             
             self.trade_history.append(trade_record)
             self.stats["trades_executed"] += 1
             self.stats["total_profit_usd"] += net_expected_daily_return
             
-            self.logger.info(f"{coin}套利交易已执行")
+            self.logger.info(
+                f"{coin}套利交易已执行\n"
+                f"  预期收益: 每天${expected_daily_return:.2f} (净收益${net_expected_daily_return:.2f})\n"
+                f"  每小时收益: ${expected_return_per_hour:.2f}"
+            )
             
         except Exception as e:
-            self.logger.error(f"执行{coin}套利时出错: {e}") 
+            self.logger.error(f"执行{coin}套利交易失败: {str(e)}")
+            # 尝试取消可能已下的订单
+            if "long_order" in locals():
+                await long_api.cancel_order(long_order)
+            if "short_order" in locals():
+                await short_api.cancel_order(short_order)
+            raise
 
     async def update_funding_rates(self):
         """
@@ -672,27 +849,39 @@ class FundingArbitrageStrategy:
             if not hasattr(self, "funding_rates"):
                 self.funding_rates = {}
             
-            # 获取Hyperliquid资金费率
-            hl_funding_rates = await self.hyperliquid_api.get_funding_rates()
-            if hl_funding_rates:
-                for coin, rate in hl_funding_rates.items():
-                    self.funding_rates[f"HL_{coin}"] = rate
-            
-            # 获取Backpack资金费率
-            bp_funding_rates = await self.backpack_api.get_funding_rates()
-            if bp_funding_rates:
-                for coin, rate in bp_funding_rates.items():
-                    self.funding_rates[f"BP_{coin}"] = rate
+            # 从所有交易所获取资金费率
+            for exchange_name, api in self.exchanges.items():
+                try:
+                    rates = await api.get_funding_rates()
+                    if rates:
+                        for coin, rate in rates.items():
+                            # 对Hyperliquid资金费率进行调整，使其与其他交易所的8小时周期匹配
+                            adjusted_rate = rate * 8 if exchange_name == "hyperliquid" else rate
+                            self.funding_rates[f"{exchange_name.upper()}_{coin}"] = adjusted_rate
+                except Exception as e:
+                    self.logger.error(f"从{exchange_name}获取资金费率出错: {e}")
+                    continue
             
             # 记录资金费率更新
             funding_info = []
             for coin in self.coins_to_monitor:
-                hl_rate = self.funding_rates.get(f"HL_{coin}")
-                bp_rate = self.funding_rates.get(f"BP_{coin}")
+                rates = {}
+                for exchange_name in self.exchanges.keys():
+                    rate = self.funding_rates.get(f"{exchange_name.upper()}_{coin}")
+                    if rate is not None:
+                        rates[exchange_name] = rate
                 
-                if hl_rate is not None and bp_rate is not None:
-                    diff = hl_rate - bp_rate
-                    funding_info.append(f"{coin}: HL={hl_rate:.6f}, BP={bp_rate:.6f}, 差={diff:.6f}")
+                if len(rates) >= 2:
+                    # 找出最高和最低资金费率
+                    max_exchange = max(rates, key=rates.get)
+                    min_exchange = min(rates, key=rates.get)
+                    max_rate = rates[max_exchange]
+                    min_rate = rates[min_exchange]
+                    diff = max_rate - min_rate
+                    
+                    funding_info.append(
+                        f"{coin}: {max_exchange}={max_rate:.6f}, {min_exchange}={min_rate:.6f}, 差={diff:.6f}"
+                    )
             
             if funding_info:
                 self.logger.debug(f"资金费率更新: {'; '.join(funding_info)}")

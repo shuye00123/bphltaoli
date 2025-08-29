@@ -2,7 +2,7 @@
 # 本配置文件包含程序运行所需的所有参数设置
 
 # 交易所API配置
-# 用于连接Backpack和Hyperliquid交易所的API密钥
+# 用于连接交易所的API密钥
 exchanges:
   backpack:
     api_key: "A--------------"   # Backpack交易所的API密钥
@@ -12,6 +12,15 @@ exchanges:
     api_key: "--------------"  # 以太坊钱包地址(API钱包)，用于签名认证
     api_secret: "--------------"  # 以太坊钱包私钥
     public_address: "--------------"  # 公共ETH钱包地址，用于查询账户信息和持仓
+  binance:
+    api_key: "--------------"  # Binance交易所的API密钥
+    api_secret: "--------------"  # Binance交易所的API密钥对应的密钥
+    testnet: false  # 是否使用测试网络，生产环境设为false
+  okx:
+    api_key: "--------------"  # OKX交易所的API密钥
+    api_secret: "--------------"  # OKX交易所的API密钥对应的密钥
+    passphrase: "--------------"  # OKX交易所的API密码
+    testnet: false  # 是否使用测试网络，生产环境设为false
 
 # 套利策略配置
 # 控制套利策略的运行方式、触发条件和交易参数

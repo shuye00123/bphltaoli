@@ -1045,4 +1045,8 @@ class BackpackAPI:
             self.logger.error(f"获取Backpack订单深度出错: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
-            return None 
+            return None
+
+
+class BackpackApi:
+    pass

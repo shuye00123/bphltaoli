@@ -19,6 +19,8 @@ try:
     # 首先尝试从包内导入
     from funding_arbitrage_bot.exchanges.backpack_api import BackpackAPI
     from funding_arbitrage_bot.exchanges.hyperliquid_api import HyperliquidAPI
+    from funding_arbitrage_bot.exchanges.binance_api import BinanceAPI
+    from funding_arbitrage_bot.exchanges.okx_api import OKXAPI
     from funding_arbitrage_bot.core.arbitrage_engine import ArbitrageEngine
     from funding_arbitrage_bot.utils.helpers import load_config
     from funding_arbitrage_bot.utils.logger import setup_logger
@@ -27,6 +29,8 @@ except ImportError:
         # 如果从包内导入失败，尝试相对导入
         from exchanges.backpack_api import BackpackAPI
         from exchanges.hyperliquid_api import HyperliquidAPI
+        from exchanges.binance_api import BinanceAPI
+        from exchanges.okx_api import OKXAPI
         from core.arbitrage_engine import ArbitrageEngine
         from utils.helpers import load_config
         from utils.logger import setup_logger
@@ -40,6 +44,8 @@ except ImportError:
         # 再次尝试相对导入
         from exchanges.backpack_api import BackpackAPI
         from exchanges.hyperliquid_api import HyperliquidAPI
+        from exchanges.binance_api import BinanceAPI
+        from exchanges.okx_api import OKXAPI
         from core.arbitrage_engine import ArbitrageEngine
         from utils.helpers import load_config
         from utils.logger import setup_logger
@@ -87,11 +93,36 @@ async def run_bot(config: Dict[str, Any], test_mode: bool = False):
     )
     print("Hyperliquid API初始化完成")
     
+    # 初始化Binance API
+    print("正在初始化Binance API...")
+    bn_config = exchange_config.get("binance", {})
+    binance_api = BinanceAPI(
+        api_key=bn_config.get("api_key", ""),
+        api_secret=bn_config.get("api_secret", ""),
+        testnet=bn_config.get("testnet", False)
+    )
+    print("Binance API初始化完成")
+    
+    # 初始化OKX API
+    print("正在初始化OKX API...")
+    okx_config = exchange_config.get("okx", {})
+    okx_api = OKXAPI(
+        api_key=okx_config.get("api_key", ""),
+        api_secret=okx_config.get("api_secret", ""),
+        passphrase=okx_config.get("passphrase", ""),
+        testnet=okx_config.get("testnet", False),
+        logger=logger,
+        config=config
+    )
+    print("OKX API初始化完成")
+    
     # 创建套利引擎实例 - 传递日志配置
     arbitrage_engine = ArbitrageEngine(
         config=config,
         backpack_api=backpack_api,
         hyperliquid_api=hyperliquid_api,
+        binance_api=binance_api,
+        okx_api=okx_api,
         logger=logger
     )
     
@@ -164,6 +195,8 @@ async def run_bot(config: Dict[str, Any], test_mode: bool = False):
     print("正在清理资源...")
     await backpack_api.close()
     await hyperliquid_api.close()
+    await binance_api.close()
+    await okx_api.close()
     
     print("套利机器人已停止")
 

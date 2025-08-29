@@ -103,14 +103,19 @@ class DisplayManager:
         table.add_column("币种", style="cyan", justify="center")
         table.add_column("BP价格", style="green", justify="right")
         table.add_column("HL价格", style="green", justify="right")
+        table.add_column("BN价格", style="green", justify="right")
+        table.add_column("OKX价格", style="green", justify="right")
         table.add_column("价格差%", style="yellow", justify="right")
         table.add_column("BP费率(8h)", style="blue", justify="right")
-        table.add_column("HL原始(1h)", style="blue", justify="right")
         table.add_column("HL调整(8h)", style="blue", justify="right")
-        table.add_column("费率差%", style="magenta", justify="right")
+        table.add_column("BN费率(8h)", style="blue", justify="right")
+        table.add_column("OKX费率(8h)", style="blue", justify="right")
+        table.add_column("最大费率差%", style="magenta", justify="right")
         table.add_column("总滑点%", style="red", justify="right")
         table.add_column("BP方向", style="red", justify="center")
         table.add_column("HL方向", style="red", justify="center")
+        table.add_column("BN方向", style="red", justify="center")
+        table.add_column("OKX方向", style="red", justify="center")
         
         try:
             # 计数有效数据
@@ -126,6 +131,8 @@ class DisplayManager:
             for symbol, symbol_data in data.items():
                 bp_data = symbol_data.get("backpack", {})
                 hl_data = symbol_data.get("hyperliquid", {})
+                bn_data = symbol_data.get("binance", {})
+                okx_data = symbol_data.get("okx", {})
                 
                 if not isinstance(bp_data, dict):
                     self.logger.warning(f"BP数据格式错误: {bp_data}")
@@ -135,27 +142,51 @@ class DisplayManager:
                     self.logger.warning(f"HL数据格式错误: {hl_data}")
                     hl_data = {"price": None, "funding_rate": None}
                 
+                if not isinstance(bn_data, dict):
+                    self.logger.warning(f"Binance数据格式错误: {bn_data}")
+                    bn_data = {"price": None, "funding_rate": None}
+                
+                if not isinstance(okx_data, dict):
+                    self.logger.warning(f"OKX数据格式错误: {okx_data}")
+                    okx_data = {"price": None, "funding_rate": None}
+                
                 # 获取价格，确保数据有效
                 bp_price = bp_data.get("price")
                 hl_price = hl_data.get("price")
+                bn_price = bn_data.get("price")
+                okx_price = okx_data.get("price")
                 
-                if bp_price is not None or hl_price is not None:
+                if bp_price is not None or hl_price is not None or bn_price is not None or okx_price is not None:
                     valid_data_count += 1
                 
-                # 计算价格差
+                # 计算价格差 (使用BP和HL的价格差作为参考)
                 if bp_price and hl_price:
                     price_diff = (bp_price - hl_price) / hl_price * 100
                 else:
                     price_diff = 0
                     
-                # 计算资金费率差
+                # 获取资金费率
                 bp_funding = bp_data.get("funding_rate")
                 hl_funding = hl_data.get("funding_rate")
                 adjusted_hl_funding = hl_data.get("adjusted_funding_rate")  # 直接使用存储的调整后资金费率
+                bn_funding = bn_data.get("funding_rate")
+                okx_funding = okx_data.get("funding_rate")
                 
-                # 计算调整后的资金费率差
-                if bp_funding is not None and adjusted_hl_funding is not None:
-                    funding_diff = (bp_funding - adjusted_hl_funding) * 100
+                # 计算所有交易所之间的最大资金费率差
+                funding_rates = []
+                if bp_funding is not None:
+                    funding_rates.append(bp_funding)
+                if adjusted_hl_funding is not None:
+                    funding_rates.append(adjusted_hl_funding)
+                if bn_funding is not None:
+                    funding_rates.append(bn_funding)
+                if okx_funding is not None:
+                    funding_rates.append(okx_funding)
+                
+                if len(funding_rates) >= 2:
+                    max_funding = max(funding_rates)
+                    min_funding = min(funding_rates)
+                    funding_diff = (max_funding - min_funding) * 100
                 else:
                     funding_diff = 0
                 
@@ -209,16 +240,22 @@ class DisplayManager:
                     "symbol": symbol,
                     "bp_price": bp_price,
                     "hl_price": hl_price,
+                    "bn_price": bn_price,
+                    "okx_price": okx_price,
                     "price_diff": price_diff,
                     "bp_funding": bp_funding,
                     "hl_funding": hl_funding,
                     "adjusted_hl_funding": adjusted_hl_funding,
+                    "bn_funding": bn_funding,
+                    "okx_funding": okx_funding,
                     "funding_diff": funding_diff,
                     "funding_diff_abs": funding_diff_abs,  # 用于排序的绝对值
                     "total_slippage": total_slippage,
                     "has_position": symbol_data.get("position"),
                     "bp_position_side": bp_position_side,
-                    "hl_position_side": hl_position_side
+                    "hl_position_side": hl_position_side,
+                    "bn_position_side": bn_data.get("position_direction"),
+                    "okx_position_side": okx_data.get("position_direction")
                 }
                 rows_data.append(row_data)
             
@@ -231,14 +268,19 @@ class DisplayManager:
                     row["symbol"],
                     f"{row['bp_price']:.2f}" if row['bp_price'] is not None else "N/A",
                     f"{row['hl_price']:.2f}" if row['hl_price'] is not None else "N/A",
+                    f"{row['bn_price']:.2f}" if row['bn_price'] is not None else "N/A",
+                    f"{row['okx_price']:.2f}" if row['okx_price'] is not None else "N/A",
                     f"{row['price_diff']:+.4f}" if row['bp_price'] and row['hl_price'] else "N/A",
                     f"{row['bp_funding']:.6f}" if row['bp_funding'] is not None else "0.000000",
-                    f"{row['hl_funding']:.6f}" if row['hl_funding'] is not None else "0.000000",
                     f"{row['adjusted_hl_funding']:.6f}" if row['adjusted_hl_funding'] is not None else "0.000000",
-                    f"{row['funding_diff']:+.6f}" if row['bp_funding'] is not None and row['adjusted_hl_funding'] is not None else "0.000000",
+                    f"{row['bn_funding']:.6f}" if row['bn_funding'] is not None else "0.000000",
+                    f"{row['okx_funding']:.6f}" if row['okx_funding'] is not None else "0.000000",
+                    f"{row['funding_diff']:+.6f}" if len(funding_rates) >= 2 else "0.000000",
                     f"{row['total_slippage']:.4f}" if row['total_slippage'] is not None else "N/A",
                     "多" if row['bp_position_side'] == "BUY" else "空" if row['bp_position_side'] == "SELL" else "-",
-                    "多" if row['hl_position_side'] == "BUY" else "空" if row['hl_position_side'] == "SELL" else "-"
+                    "多" if row['hl_position_side'] == "BUY" else "空" if row['hl_position_side'] == "SELL" else "-",
+                    "多" if row['bn_position_side'] == "BUY" else "空" if row['bn_position_side'] == "SELL" else "-",
+                    "多" if row['okx_position_side'] == "BUY" else "空" if row['okx_position_side'] == "SELL" else "-"
                 )
         
             # 创建订单统计信息表格
