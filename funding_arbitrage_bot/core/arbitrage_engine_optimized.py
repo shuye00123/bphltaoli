@@ -23,20 +23,28 @@ from typing import Dict, List, Optional, Any, Tuple, Union
 try:
     from funding_arbitrage_bot.exchanges.backpack_api import BackpackAPI
     from funding_arbitrage_bot.exchanges.hyperliquid_api import HyperliquidAPI
+    from funding_arbitrage_bot.exchanges.binance_api import BinanceAPI
+    from funding_arbitrage_bot.exchanges.okx_api import OKXAPI
     from funding_arbitrage_bot.core.data_manager import DataManager
     from funding_arbitrage_bot.utils.helpers import (
         calculate_funding_diff,
         get_backpack_symbol,
-        get_hyperliquid_symbol
+        get_hyperliquid_symbol,
+        get_binance_symbol,
+        get_okx_symbol
     )
 except ImportError:
     from ..exchanges.backpack_api import BackpackAPI
     from ..exchanges.hyperliquid_api import HyperliquidAPI
+    from ..exchanges.binance_api import BinanceAPI
+    from ..exchanges.okx_api import OKXAPI
     from ..core.data_manager import DataManager
     from ..utils.helpers import (
         calculate_funding_diff,
         get_backpack_symbol,
-        get_hyperliquid_symbol
+        get_hyperliquid_symbol,
+        get_binance_symbol,
+        get_okx_symbol
     )
 
 def retry_api(max_retries=3, delay=1):
@@ -126,11 +134,13 @@ class ArbitrageEngine:
             self.exchanges['hyperliquid'] = HyperliquidAPI
             self.stats['exchanges']['hyperliquid'] = {'trades': 0}
         
-        # 可以在这里添加更多交易所初始化
-        # 例如:
-        # if 'binance' in config:
-        #     self.exchanges['binance'] = BinanceAPI(config['binance'])
-        #     self.stats['exchanges']['binance'] = {'trades': 0}
+        # 添加Binance和OKX交易所初始化
+        if 'binance' in config:
+            self.exchanges['binance'] = BinanceAPI
+            self.stats['exchanges']['binance'] = {'trades': 0}
+        if 'okx' in config:
+            self.exchanges['okx'] = OKXAPI
+            self.stats['exchanges']['okx'] = {'trades': 0}
 
     def register_exchange(self, name: str, api_instance: Any):
         """动态注册新交易所"""
@@ -224,19 +234,19 @@ class ArbitrageEngine:
                 # 计算资金费率差
                 rate_diff = calculate_funding_diff(rate_a, rate_b)
                 
-                if abs(rate_diff) > self.config['min_rate_diff']:
+                if abs(rate_diff[0]) > self.config['min_rate_diff']:
                     opportunities.append({
                         'symbol': symbol,
                         'rate_diff': rate_diff,
-                        'direction': 'long' if rate_diff > 0 else 'short',
+                        'direction': 'long' if rate_diff[1] > 0 else 'short',
                         'exchanges': {
-                            'long': exchange_a if rate_diff > 0 else exchange_b,
-                            'short': exchange_b if rate_diff > 0 else exchange_a
+                            'long': exchange_a if rate_diff[1] > 0 else exchange_b,
+                            'short': exchange_b if rate_diff[1] > 0 else exchange_a
                         }
                     })
         
         # 按资金费率差的绝对值排序，优先处理差异最大的机会
-        opportunities.sort(key=lambda x: abs(x['rate_diff']), reverse=True)
+        opportunities.sort(key=lambda x: abs(x['rate_diff'][0]), reverse=True)
         return opportunities
 
     async def _execute_arbitrage(self, opportunity: Dict):

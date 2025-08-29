@@ -25,6 +25,16 @@ def get_hyperliquid_symbol(symbol):
     return symbol
 
 
+def get_binance_symbol(symbol):
+    """获取Binance格式的交易对"""
+    return f"{symbol}USDT"
+
+
+def get_okx_symbol(symbol):
+    """获取OKX格式的交易对"""
+    return f"{symbol}-USDT-SWAP"
+
+
 def decimal_adjust(value: float, precision: int, rounding_mode: str = 'ROUND_DOWN') -> float:
     """
     根据指定精度调整数值
@@ -94,25 +104,38 @@ def load_config(config_path: str) -> Dict[str, Any]:
     return config
 
 
-def calculate_funding_diff(bp_funding: float, hl_funding: float) -> Tuple[float, int]:
+def calculate_funding_diff(funding1: float, funding2: float, 
+                          period1: int = 8, period2: int = 1) -> Tuple[float, int]:
     """
     计算资金费率差异和差异符号
     
-    由于Hyperliquid的资金费率是每1小时结算一次，而Backpack是每8小时结算一次，
-    需要将Hyperliquid的资金费率乘以8进行标准化比较。
+    由于不同交易所的资金费率结算周期不同，需要进行标准化比较。
+    例如：Hyperliquid每1小时结算，Backpack每8小时结算，Binance每8小时结算，OKX每8小时结算。
     
     Args:
-        bp_funding: Backpack资金费率（8小时结算）
-        hl_funding: Hyperliquid资金费率（1小时结算）
+        funding1: 第一个交易所的资金费率
+        funding2: 第二个交易所的资金费率
+        period1: 第一个交易所的结算周期（小时），默认为8（Backpack/Binance/OKX）
+        period2: 第二个交易所的结算周期（小时），默认为1（Hyperliquid）
     
     Returns:
         (资金费率差值, 差值符号(1,-1或0))
     """
-    # 将Hyperliquid的资金费率乘以8，以匹配Backpack的8小时周期
-    adjusted_hl_funding = hl_funding * 8
+    # 将资金费率标准化为相同周期
+    if period1 != period2:
+        # 将较短周期的资金费率调整为较长周期
+        if period1 > period2:
+            adjusted_funding2 = funding2 * (period1 / period2)
+            adjusted_funding1 = funding1
+        else:
+            adjusted_funding1 = funding1 * (period2 / period1)
+            adjusted_funding2 = funding2
+    else:
+        adjusted_funding1 = funding1
+        adjusted_funding2 = funding2
     
     # 计算调整后的差异
-    diff = bp_funding - adjusted_hl_funding
+    diff = adjusted_funding1 - adjusted_funding2
     
     # 获取差值符号
     if diff > 0:
